@@ -118,6 +118,13 @@ class WandbLogger(Logger):
             self.experiment.log({name: value, "trainer/step": step})
         else:
             self.experiment.log({name: value})
+    
+    def log_image(self, name: str, images: Tensor, step: Optional[int] = None, **kwargs) -> None:
+        import wandb
+        if step is not None:
+            self.experiment.log({name: wandb.Image(images, **kwargs), "trainer/step": step})
+        else:
+            self.experiment.log({name: wandb.Image(i, **kwargs)})
 
     def log_video(self, name: str, video: Tensor, **kwargs) -> None:
         """Log videos inputs to wandb.

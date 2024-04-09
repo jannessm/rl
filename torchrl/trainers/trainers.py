@@ -513,7 +513,7 @@ class Trainer:
                 **average_losses,
             )
 
-    def _log(self, log_pbar=False, **kwargs) -> None:
+    def _log(self, log_pbar=False, method=None, **kwargs) -> None:
         collected_frames = self.collected_frames
         for key, item in kwargs.items():
             self._log_dict[key].append(item)
@@ -522,7 +522,7 @@ class Trainer:
                 _log = True
             else:
                 _log = False
-            method = LOGGER_METHODS.get(key, "log_scalar")
+            method = LOGGER_METHODS.get(key, "log_scalar") if method is None else method
             if _log and self.logger is not None:
                 getattr(self.logger, method)(key, item, step=collected_frames)
             if method == "log_scalar" and self.progress_bar and log_pbar:
@@ -874,6 +874,90 @@ class LogReward(TrainerHookBase):
         trainer.register_op("pre_steps_log", self)
         trainer.register_module(name, self)
 
+class LogFrames(TrainerHookBase):
+    """Frames logger hook.
+
+    Args:
+        logname (str, optional): name of the rewards to be logged. Default is :obj:`"inputs_training"`.
+        frames_key (str or tuple, optional): the key where to find the reward
+            in the input batch. Defaults to ``"pixels"``
+        concatenated_frames (int, optional): number of concatednated frames if CatFrames is used.
+            Default is `1`.
+        concatenated_dim (int, optional): dimension used with CatFrames. Default is `-3`.
+        nrow (int, optional): number of images per row. Default is `8`.
+        ncol (int, optional): number of images per column. If set to None, ncol is set to `concatenated_frames`.
+            Default is `None`.
+
+    Examples:
+        >>> log_frames = LogFrames("pixels")
+        >>> trainer.register_op("pre_steps_log", log_frames)
+
+    """
+
+
+    def __init__(
+        self,
+        logname="inputs_training",
+        frames_key: Union[str, tuple] = "pixels",
+        concatenated_frames: int = 1,
+        concatenated_dim: int = -3,
+        nrow: int = 8,
+        ncol: int = None,
+        **kwargs    # wandb.Image arguments
+    ):
+        self.logname = logname
+        self.frames_key = frames_key
+        self.nrow = nrow
+        if ncol is None:
+            self.n_frames = concatenated_frames * nrow
+        else:
+            self.n_frames = ncol * nrow
+        self.concatenated_frames = concatenated_frames
+        self.concatenated_dim = concatenated_dim
+        self.kwargs = kwargs
+
+    def __call__(self, batch: TensorDictBase) -> Dict:
+        if ("collector", "mask") in batch.keys(True):
+            frames = batch.get(self.frames_key)[
+                    batch.get(("collector", "mask"))
+                ]
+        else:
+            frames = batch.get(self.frames_key)
+
+        # unfold concatenated frames
+        if self.concatenated_frames > 1:
+            assert frames.shape[self.concatenated_dim] % self.concatenated_frames == 0
+            channels = frames.shape[self.concatenated_dim] // self.concatenated_frames
+            frames = frames.reshape(-1, channels, *frames.shape[-2:])
+            # limit amount of frames
+            frames = frames[:self.n_frames]
+            # reorder frames to be on y axis
+            frames = torch.stack([frames[i::self.concatenated_frames] for i in range(self.concatenated_frames)])
+
+            # limit amount of frames
+            data = frames.reshape(-1, channels, *frames.shape[-2:])
+        else:
+            data = frames[:self.n_frames]
+
+        # make grid as wandb does
+        if hasattr(data, "requires_grad") and data.requires_grad:
+            data = data.detach()  # type: ignore
+        if hasattr(data, "dtype") and str(data.dtype) == "torch.uint8":
+            data = data.to(float)
+        data = make_grid(data, normalize=True, nrow=self.nrow)
+        image = Image.fromarray(
+            data.mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+        )
+
+        return {
+            self.logname: image,
+            "method": "log_image",
+            **self.kwargs
+        }
+
+    def register(self, trainer: Trainer, name: str = "log_frames"):
+        trainer.register_op("pre_steps_log", self)
+        trainer.register_module(name, self)
 
 class RewardNormalizer(TrainerHookBase):
     """Reward normalizer hook.
